@@ -13,6 +13,16 @@
 #define CALIB_SAMPLES 50
 #define CALIB_DELAY_BETWEEN_SAMPLES_MS 10
 
+// --- NUEVO: FILTRO DE PEDALES (MEDIA MÓVIL / BUFFER CIRCULAR) ---
+#define PEDAL_FILTER_SIZE 16 // Cantidad de muestras para el promedio (16 suaviza muy bien)
+uint16_t accel_buffer[PEDAL_FILTER_SIZE] = {0};
+uint16_t brake_buffer[PEDAL_FILTER_SIZE] = {0};
+uint8_t pedal_filter_idx = 0;
+uint32_t accel_sum = 0;
+uint32_t brake_sum = 0;
+bool pedals_filter_initialized = false;
+// ----------------------------------------------------------------
+
 // UART pins and settings for secondary controller inputs
 #define RXD1 18
 #define TXD1 17
@@ -127,7 +137,7 @@ uint16_t bridge_startup_flags = 0;
 
 // Rangos de Giro configurables (180, 360, 540, 720 grados totales)
 const int16_t wheel_ranges[4] = {2250, 4500, 6750, 9000};
-int8_t current_range_idx = 1; // Default 4500 (360°)
+int8_t current_range_idx = 2;
 
 #if DEBUG_TEXT_LOG
 #define LOGF(...) Serial.printf(__VA_ARGS__)
@@ -136,6 +146,44 @@ int8_t current_range_idx = 1; // Default 4500 (360°)
 #define LOGF(...)
 #define LOG(...)
 #endif
+
+// --- FUNCIONES DEL FILTRO DE PEDALES ---
+
+void init_pedal_filter() {
+    uint16_t init_accel = analogRead(HALL_ACCEL_PIN);
+    uint16_t init_brake = analogRead(HALL_BRAKE_PIN);
+    for (int i = 0; i < PEDAL_FILTER_SIZE; i++) {
+        accel_buffer[i] = init_accel;
+        brake_buffer[i] = init_brake;
+    }
+    accel_sum = init_accel * PEDAL_FILTER_SIZE;
+    brake_sum = init_brake * PEDAL_FILTER_SIZE;
+    pedals_filter_initialized = true;
+}
+
+void update_pedal_filter() {
+    if (!pedals_filter_initialized) init_pedal_filter();
+
+    uint16_t raw_accel = analogRead(HALL_ACCEL_PIN);
+    uint16_t raw_brake = analogRead(HALL_BRAKE_PIN);
+
+    // Restamos la lectura más vieja, agregamos la nueva y actualizamos la suma
+    accel_sum -= accel_buffer[pedal_filter_idx];
+    accel_buffer[pedal_filter_idx] = raw_accel;
+    accel_sum += raw_accel;
+
+    brake_sum -= brake_buffer[pedal_filter_idx];
+    brake_buffer[pedal_filter_idx] = raw_brake;
+    brake_sum += raw_brake;
+
+    // Movemos el índice de forma circular
+    pedal_filter_idx = (pedal_filter_idx + 1) % PEDAL_FILTER_SIZE;
+}
+
+uint16_t get_filtered_accel_raw() { return accel_sum / PEDAL_FILTER_SIZE; }
+uint16_t get_filtered_brake_raw() { return brake_sum / PEDAL_FILTER_SIZE; }
+
+// ---------------------------------------
 
 void encoder_init() {
     pcnt_config_t pcnt_config_ch0 = {};
@@ -268,12 +316,12 @@ void update_keypad_buttons() {
         LOG("[CONFIG] Volante Centrado correctamente.");
     }
     
-    // --- LÓGICA DE CALIBRACIÓN DE PEDALES ROBUSTA ---
+    // --- CALIBRACIÓN DE PEDALES (USANDO DATOS CRUDOS) ---
+    // Importante: No usamos el filtro aquí para atrapar los picos exactos de ruido
     if (btn11_pressed) {
         LOG("[CONFIG] Pedales: Muestreando Punto MINIMO...");
         uint16_t temp_accel_min = 0;
         uint16_t temp_brake_min = 0;
-        // Toma muestras durante unos milisegundos y se queda con el valor MÁS ALTO (pico de ruido en reposo)
         for (int i = 0; i < CALIB_SAMPLES; i++) {
             uint16_t acc_val = analogRead(HALL_ACCEL_PIN);
             uint16_t brk_val = analogRead(HALL_BRAKE_PIN);
@@ -290,7 +338,6 @@ void update_keypad_buttons() {
         LOG("[CONFIG] Pedales: Muestreando Punto MAXIMO...");
         uint16_t temp_accel_max = 4095;
         uint16_t temp_brake_max = 4095;
-        // Toma muestras durante unos milisegundos y se queda con el valor MÁS BAJO (valle de ruido al presionar)
         for (int i = 0; i < CALIB_SAMPLES; i++) {
             uint16_t acc_val = analogRead(HALL_ACCEL_PIN);
             uint16_t brk_val = analogRead(HALL_BRAKE_PIN);
@@ -303,7 +350,7 @@ void update_keypad_buttons() {
         save_hall_calib_to_flash();
         LOGF("[CONFIG] Pedales MAX seteado y guardado -> Accel: %d, Brake: %d\n", hall_accel_max, hall_brake_max);
     }
-    // --------------------------------------------------
+    // ----------------------------------------------------
 
     if (btn15_pressed) {
         ffb_software_enabled = !ffb_software_enabled;
@@ -313,7 +360,6 @@ void update_keypad_buttons() {
     // 3. Mapeo para el Juego (Hacia la PC)
     uint64_t new_keypad_bits = 0;
     
-    // Botones Normales (Bits 26 a 31 = Botones 27 a 32 en vJoy)
     if (keypad_debounced_state[0]) new_keypad_bits |= (1ULL << 26);
     if (keypad_debounced_state[2]) new_keypad_bits |= (1ULL << 27);
     if (keypad_debounced_state[5]) new_keypad_bits |= (1ULL << 28);
@@ -321,7 +367,6 @@ void update_keypad_buttons() {
     if (keypad_debounced_state[10]) new_keypad_bits |= (1ULL << 30);
     if (keypad_debounced_state[13]) new_keypad_bits |= (1ULL << 31);
     
-    // Direcciones HAT/POV (Bits 32 a 35 interceptados por Python)
     if (keypad_debounced_state[1]) new_keypad_bits |= (1ULL << 32); // Arriba
     if (keypad_debounced_state[4]) new_keypad_bits |= (1ULL << 33); // Izquierda
     if (keypad_debounced_state[6]) new_keypad_bits |= (1ULL << 34); // Derecha
@@ -341,7 +386,8 @@ int16_t get_wheel_position() {
 }
 
 int16_t get_accel_position() {
-    uint16_t position = analogRead(HALL_ACCEL_PIN);
+    // Usamos el dato filtrado en lugar del crudo
+    uint16_t position = get_filtered_accel_raw();
     uint16_t c_min = min(hall_accel_min, hall_accel_max);
     uint16_t c_max = max(hall_accel_min, hall_accel_max);
     position = constrain(position, c_min, c_max);
@@ -349,7 +395,8 @@ int16_t get_accel_position() {
 }
 
 int16_t get_brake_position() {
-    uint16_t position = analogRead(HALL_BRAKE_PIN);
+    // Usamos el dato filtrado en lugar del crudo
+    uint16_t position = get_filtered_brake_raw();
     uint16_t c_min = min(hall_brake_min, hall_brake_max);
     uint16_t c_max = max(hall_brake_min, hall_brake_max);
     position = constrain(position, c_min, c_max);
@@ -576,15 +623,19 @@ void motor_self_test() {
     bool last_hold = false;
     int16_t target = -MOTOR_SELF_TEST_POSITION;
     reset_position_pid_state();
-    for (int phase=0; phase<3; phase++) {
-        if (phase==1) target = MOTOR_SELF_TEST_POSITION;
-        if (phase==2) target = 0;
+    
+    for(int phase=0; phase<3; phase++) {
+        if(phase == 1) target = MOTOR_SELF_TEST_POSITION;
+        if(phase == 2) target = 0;
+        
         start_time = millis(); hold_pos_time = 0; last_hold = false;
         reset_position_pid_state();
+        
         while (true) {
             update_position();
             float pid_output = get_pos_PID(target);
             set_motor_torque((int16_t)constrain(pid_output, -MOTOR_SELF_TEST_TORQUE_LIMIT, MOTOR_SELF_TEST_TORQUE_LIMIT));
+            
             if (abs(target - ffb_position) <= MOTOR_SELF_TEST_POS_TOL) {
                 if (!last_hold) { hold_pos_time = millis(); last_hold = true; } 
                 else if (millis() - hold_pos_time >= MOTOR_SELF_TEST_HOLD_TIME_MS) break;
@@ -611,6 +662,10 @@ void setup() {
     encoder_init();
     hall_init();
     motor_init();
+    
+    // Inicializamos el filtro antes de arrancar todo
+    init_pedal_filter();
+    
     if (bridge_startup_flags & STARTUP_FLAG_AUTO_CALIB) {
         hall_calib();
     } else if (!load_hall_calib_from_flash()) {
@@ -619,7 +674,7 @@ void setup() {
     if (!(bridge_startup_flags & STARTUP_FLAG_SKIP_SELF_TEST)) {
         motor_self_test();
     }
-    // Setear el cero inicial al arrancar
+    
     int16_t initial_raw_pos = 0;
     pcnt_get_counter_value(PCNT_UNIT_USED, &initial_raw_pos);
     ffb_position_offset = initial_raw_pos;
@@ -631,11 +686,17 @@ void loop() {
     hid_buttons = keypad_buttons | secondary_buttons;
     handle_bridge_serial();
     update_position();
+    
+    // --- NUEVO: LLamamos al filtro de pedales cada ciclo de loop ---
+    update_pedal_filter();
+    
     joyX = get_wheel_position();
     joyY = get_accel_position();
     joyZ = get_brake_position();
+    
     uint32_t now = millis();
     set_motor_torque(ffb_torque_value);
+    
     if ((uint32_t)(now - last_bridge_telem_ms) >= BRIDGE_TELEMETRY_INTERVAL_MS) {
         last_bridge_telem_ms = now;
         send_bridge_telemetry();
