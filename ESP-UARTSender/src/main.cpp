@@ -47,11 +47,8 @@ struct EncoderData {
 };
 
 EncoderData encoders[NUM_ENCODERS] = {
-    // Encoder 0: pins 1, 22, 23 | virtual IDs: 14, 15 (Normal) - 16, 17 (Alternative)
     {23, 22, 1, 0, false, 14, 15, 16, 17, 0, HIGH},
-    // Encoder 1: pins 4, 2, 15 | virtual IDs: 18, 19 (Normal) - 20, 21 (Alternative)
     {4, 2, 15, 0, false, 18, 19, 20, 21, 0, HIGH},
-    // Encoder 2: pins 35, 34, 36 | virtual IDs: 22, 23 (Normal) - 24, 25 (Alternative)
     {5, 21, 3, 0, false, 22, 23, 24, 25, 0, HIGH}
 };
 
